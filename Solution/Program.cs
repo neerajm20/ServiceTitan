@@ -28,22 +28,43 @@ namespace Solution
         }
     }
 
-    public interface ICachePolicy
+    //TODO: nmittal - nmittal - install code contract library
+    [ContractClass(typeof(CacheableContract))]
+    public interface ICacheable
     {
+        string Key { get; }
         TimeSpan? Ttl { get; }
     }
 
-    public class CacheKey<T>
+    [ContractClassFor(typeof(ICacheable))]
+    internal abstract class CacheableContract : ICacheable
     {
+        public string Key
+        {
+            get
+            {
+                Contract.Requires(!String.IsNullOrWhiteSpace(Key));
+                return null;
+            }
+        }
+
+        public TimeSpan? Ttl
+        {
+            get { return null; }
+        }
+    }
+
+    public class CacheKey
+    {
+        public Type ObjectType { get; set; }
         public string Id { get; set; }
 
         public override string ToString()
         {
-            return $"{typeof(T).FullName}.{Id}";
+            return $"{ObjectType.FullName}.{Id}";
         }
     }
 
-    //TODO: nmittal - nmittal - install code contract library
     //TODO: nmittal - nmittal - can be extended to support CacheKey and CachePolicy
     [ContractClass(typeof(CacheContract))]
     public interface ICache
@@ -150,13 +171,13 @@ namespace Solution
                 if (EqualityComparer<T>.Default.Equals(value, default(T)))
                 {
                     value = await hydrator().ConfigureAwait(false);
-                    if (typeof(ICachePolicy).IsAssignableFrom(typeof(T)))
+                    if (!ttl.HasValue && typeof(ICacheable).IsAssignableFrom(typeof(T)))
                     {
-                        ttl = ((ICachePolicy) value).Ttl;
+                        ttl = ((ICacheable) value).Ttl;
                     }
+                    
+                    await Upsert(key, value, ttl).ConfigureAwait(false);
                 }
-
-                await Upsert(key, value, ttl).ConfigureAwait(false);
             }
             finally
             {
@@ -187,13 +208,30 @@ namespace Solution
     }
 
     //TODO: nmittal - nmittal - dont need to inherit ICachePolicy, should be configuration based
-    public class Person : ICachePolicy
+    public class Person : ICacheable
     {
         private const int PersonCacheAbsoluteExpirationMs = 1000;
 
         public string Id { get; set; }
         public string FirstName { get; set; }
         public string LastName { get; set; }
+
+        public string Key
+        {
+            get
+            {
+                if (String.IsNullOrWhiteSpace(Id))
+                {
+                    return null;
+                }
+
+                return new CacheKey()
+                {
+                    ObjectType = this.GetType(),
+                    Id = Id
+                }.ToString();
+            }
+        }
 
         public TimeSpan? Ttl { get; }
 
@@ -233,6 +271,7 @@ namespace Solution
             // this code will be replaced to get a person from the data store
             _person0 = new Person()
             {
+                Id = Guid.NewGuid().ToString(),
                 FirstName = "Neeraj",
                 LastName = "Mittal"
             };
@@ -243,11 +282,7 @@ namespace Solution
             _person0.Id = id;
             async Task<Person> Func() => await Task.FromResult(_person0).ConfigureAwait(false);
 
-            var cacheKey = new CacheKey<Person>()
-            {
-                Id = _person0.Id
-            };
-            return await _cache.GetOrInsert(cacheKey.ToString(), Func).ConfigureAwait(false);
+            return await _cache.GetOrInsert(_person0.Key, Func).ConfigureAwait(false);
         }
     }
 
@@ -397,7 +432,7 @@ namespace Solution
                 }
                 catch (Exception)
                 {
-                    Console.WriteLine("Failed");
+                    Console.WriteLine("Failed!!!!!!!!!!!");
                 }
             }
         }
@@ -406,10 +441,7 @@ namespace Solution
     public class PersonRepositoryTest
     {
         private const string Key0 = "f2aa8194c8804d979b4f233cc413afb3";
-        private readonly CacheKey<Person> _cacheKey = new CacheKey<Person>()
-        {
-            Id = Key0
-        };
+        private readonly Person _person0 = new Person() {Id = Key0};
 
         private readonly ICache _target = InMemoryCache.Instance;
         private readonly IPersonRepository _personRepository = new PersonRepository();
@@ -421,13 +453,12 @@ namespace Solution
 
         public void GetPersonById_EntryNotInCache_ReturnsValue()
         {
-            var key = _cacheKey.ToString();
-            Assert(_target.Get<Person>(key).Result == null);
+            Assert(_target.Get<Person>(_person0.Key).Result == null);
             Assert(_personRepository.GetPersonById(Key0).Result.Id == Key0);
-            Assert(_target.Get<Person>(key).Result.Id == Key0);
+            Assert(_target.Get<Person>(_person0.Key).Result.Id == Key0);
 
             // cleanup
-            _target.Remove(key);
+            _target.Remove(_person0.Key);
         }
 
         private void Assert(bool criteria)
@@ -448,7 +479,7 @@ namespace Solution
                 }
                 catch (Exception)
                 {
-                    Console.WriteLine("Failed");
+                    Console.WriteLine("Failed!!!!!!!!!!!");
                 }
             }
         }
