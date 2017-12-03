@@ -42,7 +42,7 @@ Done.
 ```
 1. Solution
 
-2. ICacheable. CacheableContract
+2. ICacheable, CacheableContract
 
 3. CacheKey
 
@@ -58,7 +58,29 @@ Done.
 
 ```
 
+#### Solution
+Main class that runs the program.
 
+#### ICacheable, CacheableContract
+Define the interface and validation contract for any Service that wants to be Cacheable.
+
+#### CacheKey
+Every key is unique in the ICache implementation. This helper class makes the key unique within the type of object you are storing in the cache.
+
+#### ICache, CacheContract, InMemoryCache
+Interface, validation and an in-memory implementation of the actual Cache.
+
+#### Person : ICacheable
+An example cacheable entity.
+
+#### IPersonRepository, PersonRepositoryContract, PersonRepository
+A sample repository implementation for CRUD on a Person entity. It uses ICache internally.
+
+#### CachingServiceTest
+Test cases for InMemoryCache implementation. This can be extended to support other cache types in the future.
+
+#### PersonRepositoryTest
+Test cases for the PersonRepository implementation, including making sure ICache is being used.
 
 ## Authors
 
