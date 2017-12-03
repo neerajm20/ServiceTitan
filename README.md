@@ -44,7 +44,7 @@ Done.
 ## Explanation of Code
 
 ### Design
-High-level, I am providing an ICache interface and a thread-safe in-memory cache implementation of it. This can be used by various code modules for local inmemory caching.
+High-level, I am providing an ICache interface and a thread-safe in-memory cache implementation of it. This can be used by various code modules for local in-memory caching.
 
 Per the exercise requirements, a sample service repository (PersonRepository) is provided, to show how it will be used.
 
