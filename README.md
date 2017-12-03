@@ -15,6 +15,9 @@ C# .Net Framework 4 contains an implementation of an in-memory cache under Syste
 3. Run (all output is written to stdout)
 ```
 
+### Prerequisites
+This solution is tested on Visual Studio 2017 Community Edition and Jetbrains Rider 2017
+
 ## Sample Output
 
 ```
