@@ -3,7 +3,9 @@
 This project contains the interview answer for ServiceTitan's long hackerrank coding test. I chose the problem Caching Services.
 
 ## Question: Why did you not implement in HackerRank?
-C# .Net Framework 4 contains a preimplemented Cache under System.Runtime.Caching. Hackerrank did not provide this reference.
+C# .Net Framework 4 contains a pre-implemented Cache under System.Runtime.Caching. Hackerrank did not provide this reference.
+
+_Note: The only change that deviated finishing the entire exercise in HackerRank is adding reference System.Runtime.Caching
 
 ## Installing and Running
 
