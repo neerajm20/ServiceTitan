@@ -1,9 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Diagnostics.Contracts;
-using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Runtime.Caching;
 using System.Threading;
@@ -22,7 +19,7 @@ namespace Solution
             var cachingServiceTest = new CachingServiceTest();
             cachingServiceTest.RunAllTests();
             Console.WriteLine("Done.");
-            
+
             Console.WriteLine("Running Service and repository tests...");
             // test service and repository implementation
 //            var serviceRepositoryTest = new ServiceRepositoryTest();
@@ -30,7 +27,7 @@ namespace Solution
             Console.WriteLine("Done.");
         }
     }
-    
+
     //TODO: nmittal - nmittal - install code contract library
     [ContractClass(typeof(CacheableContract))]
     public interface ICacheable
@@ -46,7 +43,7 @@ namespace Solution
         {
             get
             {
-                Contract.Ensures(Contract.Result<string>() != null);                
+                Contract.Ensures(Contract.Result<string>() != null);
                 return null;
             }
         }
@@ -61,27 +58,36 @@ namespace Solution
     [ContractClass(typeof(CacheContract))]
     public interface ICache
     {
-        Task<object> Get(string key, Type type);
-        Task Upsert(string key, object value, TimeSpan? ttl = null);
+        Task<T> Get<T>(string key);
+        Task Upsert<T>(string key, T value, TimeSpan? ttl = null);
+        Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null);
         Task Remove(string key);
     }
 
     [ContractClassFor(typeof(ICache))]
     internal abstract class CacheContract : ICache
     {
-        public Task<object> Get(string key, Type type)
+        public Task<T> Get<T>(string key)
         {
             Contract.Requires(!String.IsNullOrWhiteSpace(key));
-            Contract.Requires(type != null);
             Contract.Ensures(Contract.Result<Task<object>>() != null);
 
             return null;
         }
 
-        public Task Upsert(string key, object value, TimeSpan? ttl = null)
+        public Task Upsert<T>(string key, T value, TimeSpan? ttl = null)
         {
             Contract.Requires(!String.IsNullOrWhiteSpace(key));
             Contract.Ensures(Contract.Result<Task>() != null);
+
+            return null;
+        }
+
+        public Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null)
+        {
+            Contract.Requires(!String.IsNullOrWhiteSpace(key));
+            Contract.Requires(hydrator != null);
+            Contract.Ensures(Contract.Result<Task<object>>() != null);
 
             return null;
         }
@@ -95,25 +101,38 @@ namespace Solution
         }
     }
 
-    public class InMemoryCache : ICache
+    public class InMemoryCache : ICache, IDisposable
     {
+        private const string DefaultCacheName = "InMemoryCache";
+        
         // Singleton referance
         // typically, this would be controlled via a IoC Container
         private static ICache _instance = new InMemoryCache();
+
         public static ICache Instance
         {
             get { return _instance; }
         }
 
-        private readonly ObjectCache _cache = new MemoryCache("InMemoryCache");
+        private ReaderWriterLockSlim _cacheLock = new ReaderWriterLockSlim();
+
+        private readonly ObjectCache _cache = new MemoryCache(DefaultCacheName);
         private static readonly TimeSpan MaxMaxAge = TimeSpan.FromMinutes(15);
 
-        public async Task<object> Get(string key, Type type)
+        public async Task<T> Get<T>(string key)
         {
-            return _cache.Get(key);
+            _cacheLock.EnterReadLock();
+            try
+            {
+                return (T) (_cache.Get(key));
+            }
+            finally
+            {
+                _cacheLock.ExitReadLock();
+            }
         }
 
-        public async Task Upsert(string key, object value, TimeSpan? ttl = null)
+        public async Task Upsert<T>(string key, T value, TimeSpan? ttl = null)
         {
             // Seems arbitrary, but caching in memory for > 15 minutes is of very low value 
             // with a high cost when things are out of sync
@@ -122,19 +141,65 @@ namespace Solution
                 ttl = MaxMaxAge;
             }
 
-            _cache.Set(key, value, DateTime.Now.Add(ttl.Value));
+            _cacheLock.EnterWriteLock();
+            try
+            {
+                _cache.Set(key, value, DateTime.Now.Add(ttl.Value));
+            }
+            finally
+            {
+                _cacheLock.ExitWriteLock();
+            }
+        }
+
+        public async Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null)
+        {
+            T value = default(T);
+
+            _cacheLock.EnterUpgradeableReadLock();
+            try
+            {
+                value = await Get<T>(key).ConfigureAwait(false);
+
+                // hydrate if a complete cache miss.
+                if (EqualityComparer<T>.Default.Equals(value, default(T)))
+                {
+                    value = await hydrator().ConfigureAwait(false);
+                }
+
+                await Upsert(key, value, ttl).ConfigureAwait(false);
+            }
+            finally
+            {
+                _cacheLock.ExitUpgradeableReadLock();
+            }
+
+            return value;
         }
 
         public async Task Remove(string key)
         {
-            _cache.Remove(key);
+            _cacheLock.EnterWriteLock();
+            try
+            {
+                _cache.Remove(key);
+            }
+            finally
+            {
+                _cacheLock.ExitWriteLock();
+            }
+        }
+
+        public void Dispose()
+        {
+            _cacheLock?.Dispose();
         }
     }
 
     public class Person : ICacheable
     {
         private const int PersonCacheAbsoluteExpirationMs = 10;
-        
+
         private string _id;
         public string FirstName { get; set; }
         public string LastName { get; set; }
@@ -142,11 +207,8 @@ namespace Solution
         public string Key { get; private set; }
         public TimeSpan? Ttl { get; private set; }
 
-        public Person(string id = null)
+        public Person()
         {
-            if (String.IsNullOrEmpty(id)) id = Guid.NewGuid().ToString();
-            
-            this.Id = id;
             this.Ttl = TimeSpan.FromMilliseconds(PersonCacheAbsoluteExpirationMs);
         }
 
@@ -171,8 +233,10 @@ namespace Solution
         private const string Key0 = "f2aa8194c8804d979b4f233cc413afb3";
         private const string Value0 = "98641a2022154dfb8222d4c862999480";
         private const string Value1 = "8eb0173f4bd04ef69995ce72b57e2c85";
-        private Person person0 = new Person(Key0)
+
+        private Person person0 = new Person()
         {
+            Id = Key0,
             FirstName = "Neeraj",
             LastName = "Mittal"
         };
@@ -183,10 +247,12 @@ namespace Solution
         {
             Get_EntryPresent_ReturnsValue,
             Get_EntryNotPresent_ReturnsNull,
-            UpsertEntryNotPresent_SetsValue,
+            Upsert_EntryNotPresent_SetsValue,
             Upsert_EntryAlreadyPresent_OverwritesValue,
             Upsert_EntryAlreadyPresent_OverwritesPersonValue,
             Upsert_WithTtl_CausesDataToExpire,
+            GetOrInsert_GetEntryPresent_ReturnsValue,
+            GetOrInsert_GetEntryNotPresent_ReturnsValue,
             Delete_EntryNotPresent_DoesNothing,
             Delete_EntryPresent_RemovesValue
         };
@@ -194,7 +260,7 @@ namespace Solution
         private void Get_EntryPresent_ReturnsValue()
         {
             Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            Assert(Target.Get<string>(Key0).Result == Value0);
 
             // cleanup
             Target.Remove(Key0);
@@ -202,13 +268,13 @@ namespace Solution
 
         private void Get_EntryNotPresent_ReturnsNull()
         {
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(Target.Get<string>(Key0).Result == null);
         }
 
-        public void UpsertEntryNotPresent_SetsValue()
+        public void Upsert_EntryNotPresent_SetsValue()
         {
             Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            Assert(Target.Get<string>(Key0).Result == Value0);
 
             // cleanup
             Target.Remove(Key0);
@@ -219,7 +285,7 @@ namespace Solution
             Target.Upsert(Key0, Value0).Wait();
             Target.Upsert(Key0, Value1).Wait();
 
-            Assert(Target.Get(Key0, typeof(string)).Result == Value1);
+            Assert(Target.Get<string>(Key0).Result == Value1);
 
             // cleanup
             Target.Remove(Key0);
@@ -230,7 +296,7 @@ namespace Solution
             Target.Upsert(Key0, Value0).Wait();
             Target.Upsert(Key0, person0).Wait();
 
-            var actualPerson = (Person)Target.Get(Key0, typeof(Person)).Result;
+            var actualPerson = Target.Get<Person>(Key0).Result;
             Assert(actualPerson.FirstName == person0.FirstName);
             Assert(actualPerson.LastName == person0.LastName);
 
@@ -243,7 +309,7 @@ namespace Solution
             var ttl = TimeSpan.FromMilliseconds(10);
 
             Target.Upsert(Key0, Value0, ttl).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            Assert(Target.Get<string>(Key0).Result == Value0);
 
             var startTime = DateTime.UtcNow;
             while ((DateTime.UtcNow - startTime) < ttl)
@@ -251,22 +317,41 @@ namespace Solution
                 Thread.Sleep(ttl);
             }
 
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(Target.Get<string>(Key0).Result == null);
+        }
+
+        public void GetOrInsert_GetEntryPresent_ReturnsValue()
+        {
+            Target.Upsert(Key0, Value0).Wait();
+            Assert(Target.GetOrInsert<string>(Key0, async () => Value1).Result == Value0);
+            Assert(Target.Get<string>(Key0).Result != Value1);
+
+            // cleanup
+            Target.Remove(Key0);
+        }
+
+        public void GetOrInsert_GetEntryNotPresent_ReturnsValue()
+        {
+            Assert(Target.GetOrInsert<string>(Key0, async () => Value1).Result == Value1);
+            Assert(Target.Get<string>(Key0).Result != Value0);
+
+            // cleanup
+            Target.Remove(Key0);
         }
 
         public void Delete_EntryNotPresent_DoesNothing()
         {
             Target.Remove(Key0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(Target.Get<string>(Key0).Result == null);
         }
 
         public void Delete_EntryPresent_RemovesValue()
         {
             Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            Assert(Target.Get<string>(Key0).Result == Value0);
 
             Target.Remove(Key0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(Target.Get<string>(Key0).Result == null);
         }
 
         public static void Assert(bool criteria)
