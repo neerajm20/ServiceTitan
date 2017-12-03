@@ -38,8 +38,23 @@ Done.
 
 ## Explanation of Code
 
-###List of Classes
+### Classes
 ```
+1. Solution
+
+2. ICacheable. CacheableContract
+
+3. CacheKey
+
+4. ICache, CacheContract, InMemoryCache
+
+5. Person : ICacheable
+
+6. IPersonRepository, PersonRepositoryContract, PersonRepository
+
+7. CachingServiceTest
+
+8. PersonRepositoryTest
 
 ```
 
