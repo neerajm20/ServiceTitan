@@ -1,9 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Diagnostics.Contracts;
-using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Runtime.Caching;
 using System.Threading;
@@ -22,15 +19,15 @@ namespace Solution
             var cachingServiceTest = new CachingServiceTest();
             cachingServiceTest.RunAllTests();
             Console.WriteLine("Done.");
-            
+
             Console.WriteLine("Running Service and repository tests...");
             // test service and repository implementation
-//            var serviceRepositoryTest = new ServiceRepositoryTest();
-//            serviceRepositoryTest.RunAllTests();
+            var personRepositoryTest = new PersonRepositoryTest();
+            personRepositoryTest.RunAllTests();
             Console.WriteLine("Done.");
         }
     }
-    
+
     //TODO: nmittal - nmittal - install code contract library
     [ContractClass(typeof(CacheableContract))]
     public interface ICacheable
@@ -46,7 +43,7 @@ namespace Solution
         {
             get
             {
-                Contract.Ensures(Contract.Result<string>() != null);                
+                Contract.Requires(!String.IsNullOrWhiteSpace(Key));
                 return null;
             }
         }
@@ -57,31 +54,51 @@ namespace Solution
         }
     }
 
+    public class CacheKey
+    {
+        public Type ObjectType { get; set; }
+        public string Id { get; set; }
+
+        public override string ToString()
+        {
+            return $"{ObjectType.FullName}.{Id}";
+        }
+    }
+
     //TODO: nmittal - nmittal - can be extended to support CacheKey and CachePolicy
     [ContractClass(typeof(CacheContract))]
     public interface ICache
     {
-        Task<object> Get(string key, Type type);
-        Task Upsert(string key, object value, TimeSpan? ttl = null);
+        Task<T> Get<T>(string key);
+        Task Upsert<T>(string key, T value, TimeSpan? ttl = null);
+        Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null);
         Task Remove(string key);
     }
 
     [ContractClassFor(typeof(ICache))]
     internal abstract class CacheContract : ICache
     {
-        public Task<object> Get(string key, Type type)
+        public Task<T> Get<T>(string key)
         {
             Contract.Requires(!String.IsNullOrWhiteSpace(key));
-            Contract.Requires(type != null);
             Contract.Ensures(Contract.Result<Task<object>>() != null);
 
             return null;
         }
 
-        public Task Upsert(string key, object value, TimeSpan? ttl = null)
+        public Task Upsert<T>(string key, T value, TimeSpan? ttl = null)
         {
             Contract.Requires(!String.IsNullOrWhiteSpace(key));
             Contract.Ensures(Contract.Result<Task>() != null);
+
+            return null;
+        }
+
+        public Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null)
+        {
+            Contract.Requires(!String.IsNullOrWhiteSpace(key));
+            Contract.Requires(hydrator != null);
+            Contract.Ensures(Contract.Result<Task<object>>() != null);
 
             return null;
         }
@@ -95,17 +112,32 @@ namespace Solution
         }
     }
 
-    public class InMemoryCache : ICache
+    public class InMemoryCache : ICache, IDisposable
     {
-        private readonly ObjectCache _cache = new MemoryCache("InMemoryCache");
+        private const string DefaultCacheName = "InMemoryCache";
         private static readonly TimeSpan MaxMaxAge = TimeSpan.FromMinutes(15);
 
-        public async Task<object> Get(string key, Type type)
+        // Singleton referance
+        // typically, this would be controlled via a IoC Container
+        public static readonly ICache Instance = new InMemoryCache();
+
+        private readonly ObjectCache _cache = new MemoryCache(DefaultCacheName);
+        private readonly ReaderWriterLockSlim _cacheLock = new ReaderWriterLockSlim();
+
+        public async Task<T> Get<T>(string key)
         {
-            return _cache.Get(key);
+            _cacheLock.EnterReadLock();
+            try
+            {
+                return await Task.FromResult((T) (_cache.Get(key))).ConfigureAwait(false);
+            }
+            finally
+            {
+                _cacheLock.ExitReadLock();
+            }
         }
 
-        public async Task Upsert(string key, object value, TimeSpan? ttl = null)
+        public async Task Upsert<T>(string key, T value, TimeSpan? ttl = null)
         {
             // Seems arbitrary, but caching in memory for > 15 minutes is of very low value 
             // with a high cost when things are out of sync
@@ -114,47 +146,143 @@ namespace Solution
                 ttl = MaxMaxAge;
             }
 
-            _cache.Set(key, value, DateTime.Now.Add(ttl.Value));
+            _cacheLock.EnterWriteLock();
+            try
+            {
+                _cache.Set(key, value, DateTime.Now.Add(ttl.Value));
+                await Task.FromResult(false).ConfigureAwait(false);
+            }
+            finally
+            {
+                _cacheLock.ExitWriteLock();
+            }
+        }
+
+        public async Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null)
+        {
+            T value;
+
+            _cacheLock.EnterUpgradeableReadLock();
+            try
+            {
+                value = await Get<T>(key).ConfigureAwait(false);
+
+                // hydrate if a complete cache miss.
+                if (EqualityComparer<T>.Default.Equals(value, default(T)))
+                {
+                    value = await hydrator().ConfigureAwait(false);
+                    if (!ttl.HasValue && typeof(ICacheable).IsAssignableFrom(typeof(T)))
+                    {
+                        ttl = ((ICacheable) value).Ttl;
+                    }
+                    
+                    await Upsert(key, value, ttl).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _cacheLock.ExitUpgradeableReadLock();
+            }
+
+            return value;
         }
 
         public async Task Remove(string key)
         {
-            _cache.Remove(key);
-        }
-    }
-
-    public class Person : ICacheable
-    {
-        private const int PersonCacheAbsoluteExpirationMs = 10;
-        
-        private string _id;
-        public string FirstName { get; set; }
-        public string LastName { get; set; }
-
-        public string Key { get; private set; }
-        public TimeSpan? Ttl { get; private set; }
-
-        public Person(string id = null)
-        {
-            if (String.IsNullOrEmpty(id)) id = Guid.NewGuid().ToString();
-            
-            this.Id = id;
-            this.Ttl = TimeSpan.FromMilliseconds(PersonCacheAbsoluteExpirationMs);
-        }
-
-        public string Id
-        {
-            get { return this._id; }
-            set
+            _cacheLock.EnterWriteLock();
+            try
             {
-                this._id = value;
-                setKey(_id);
+                _cache.Remove(key);
+                await Task.FromResult(false).ConfigureAwait(false);
+            }
+            finally
+            {
+                _cacheLock.ExitWriteLock();
             }
         }
 
-        private void setKey(string id)
+        public void Dispose()
         {
-            this.Key = $"{this.GetType().AssemblyQualifiedName}.{Id}";
+            _cacheLock?.Dispose();
+        }
+    }
+
+    //TODO: nmittal - nmittal - dont need to inherit ICachePolicy, should be configuration based
+    public class Person : ICacheable
+    {
+        private const int PersonCacheAbsoluteExpirationMs = 1000;
+
+        public string Id { get; set; }
+        public string FirstName { get; set; }
+        public string LastName { get; set; }
+
+        public string Key
+        {
+            get
+            {
+                if (String.IsNullOrWhiteSpace(Id))
+                {
+                    return null;
+                }
+
+                return new CacheKey()
+                {
+                    ObjectType = this.GetType(),
+                    Id = Id
+                }.ToString();
+            }
+        }
+
+        public TimeSpan? Ttl { get; }
+
+        public Person()
+        {
+            Ttl = TimeSpan.FromMilliseconds(PersonCacheAbsoluteExpirationMs);
+        }
+    }
+
+    [ContractClass(typeof(PersonRepositoryContract))]
+    public interface IPersonRepository
+    {
+        Task<Person> GetPersonById(string id);
+    }
+
+    [ContractClassFor(typeof(IPersonRepository))]
+    internal class PersonRepositoryContract : IPersonRepository
+    {
+        public Task<Person> GetPersonById(string id)
+        {
+            Contract.Requires(!String.IsNullOrWhiteSpace(id));
+            return null;
+        }
+    }
+
+    public class PersonRepository : IPersonRepository
+    {
+        private readonly ICache _cache;
+        private readonly Person _person0;
+
+        //TODO: nmittal - nmittal - ICache would typically be injected via an IoC Container
+        public PersonRepository(ICache cache = null)
+        {
+            if (cache == null) cache = InMemoryCache.Instance;
+            _cache = cache;
+
+            // this code will be replaced to get a person from the data store
+            _person0 = new Person()
+            {
+                Id = Guid.NewGuid().ToString(),
+                FirstName = "Neeraj",
+                LastName = "Mittal"
+            };
+        }
+
+        public async Task<Person> GetPersonById(string id)
+        {
+            _person0.Id = id;
+            async Task<Person> Func() => await Task.FromResult(_person0).ConfigureAwait(false);
+
+            return await _cache.GetOrInsert(_person0.Key, Func).ConfigureAwait(false);
         }
     }
 
@@ -163,79 +291,83 @@ namespace Solution
         private const string Key0 = "f2aa8194c8804d979b4f233cc413afb3";
         private const string Value0 = "98641a2022154dfb8222d4c862999480";
         private const string Value1 = "8eb0173f4bd04ef69995ce72b57e2c85";
-        private Person person0 = new Person(Key0)
+
+        private readonly Person _person0 = new Person()
         {
+            Id = Key0,
             FirstName = "Neeraj",
             LastName = "Mittal"
         };
 
-        private ICache Target = new InMemoryCache();
+        private readonly ICache _target = InMemoryCache.Instance;
 
         public Action[] AllTests => new Action[]
         {
             Get_EntryPresent_ReturnsValue,
             Get_EntryNotPresent_ReturnsNull,
-            UpsertEntryNotPresent_SetsValue,
+            Upsert_EntryNotPresent_SetsValue,
             Upsert_EntryAlreadyPresent_OverwritesValue,
             Upsert_EntryAlreadyPresent_OverwritesPersonValue,
             Upsert_WithTtl_CausesDataToExpire,
+            GetOrInsert_GetEntryPresent_ReturnsValue,
+            GetOrInsert_GetEntryNotPresent_ReturnsValue,
             Delete_EntryNotPresent_DoesNothing,
             Delete_EntryPresent_RemovesValue
         };
 
         private void Get_EntryPresent_ReturnsValue()
         {
-            Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            _target.Upsert(Key0, Value0).Wait();
+            Assert(_target.Get<string>(Key0).Result == Value0);
 
             // cleanup
-            Target.Remove(Key0);
+            _target.Remove(Key0);
         }
 
         private void Get_EntryNotPresent_ReturnsNull()
         {
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(_target.Get<string>(Key0).Result == null);
         }
 
-        public void UpsertEntryNotPresent_SetsValue()
+        public void Upsert_EntryNotPresent_SetsValue()
         {
-            Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            _target.Upsert(Key0, Value0).Wait();
+            Assert(_target.Get<string>(Key0).Result == Value0);
 
             // cleanup
-            Target.Remove(Key0);
+            _target.Remove(Key0);
         }
 
         public void Upsert_EntryAlreadyPresent_OverwritesValue()
         {
-            Target.Upsert(Key0, Value0).Wait();
-            Target.Upsert(Key0, Value1).Wait();
+            _target.Upsert(Key0, Value0).Wait();
+            _target.Upsert(Key0, Value1).Wait();
 
-            Assert(Target.Get(Key0, typeof(string)).Result == Value1);
+            Assert(_target.Get<string>(Key0).Result == Value1);
 
             // cleanup
-            Target.Remove(Key0);
+            _target.Remove(Key0);
         }
 
         public void Upsert_EntryAlreadyPresent_OverwritesPersonValue()
         {
-            Target.Upsert(Key0, Value0).Wait();
-            Target.Upsert(Key0, person0).Wait();
+            _target.Upsert(Key0, Value0).Wait();
+            _target.Upsert(Key0, _person0).Wait();
 
-            var actualPerson = (Person)Target.Get(Key0, typeof(Person)).Result;
-            Assert(actualPerson.FirstName == person0.FirstName);
-            Assert(actualPerson.LastName == person0.LastName);
+            var actualPerson = _target.Get<Person>(Key0).Result;
+            Assert(actualPerson.FirstName == _person0.FirstName);
+            Assert(actualPerson.LastName == _person0.LastName);
 
             // cleanup
-            Target.Remove(Key0);
+            _target.Remove(Key0);
         }
 
         public void Upsert_WithTtl_CausesDataToExpire()
         {
             var ttl = TimeSpan.FromMilliseconds(10);
 
-            Target.Upsert(Key0, Value0, ttl).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            _target.Upsert(Key0, Value0, ttl).Wait();
+            Assert(_target.Get<string>(Key0).Result == Value0);
 
             var startTime = DateTime.UtcNow;
             while ((DateTime.UtcNow - startTime) < ttl)
@@ -243,25 +375,46 @@ namespace Solution
                 Thread.Sleep(ttl);
             }
 
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            Assert(_target.Get<string>(Key0).Result == null);
+        }
+
+        public void GetOrInsert_GetEntryPresent_ReturnsValue()
+        {
+            _target.Upsert(Key0, Value0).Wait();
+            Assert(_target.GetOrInsert(Key0, async () => await Task.FromResult(Value1).ConfigureAwait(false)).Result ==
+                   Value0);
+            Assert(_target.Get<string>(Key0).Result != Value1);
+
+            // cleanup
+            _target.Remove(Key0);
+        }
+
+        public void GetOrInsert_GetEntryNotPresent_ReturnsValue()
+        {
+            Assert(_target.GetOrInsert(Key0, async () => await Task.FromResult(Value1).ConfigureAwait(false)).Result ==
+                   Value1);
+            Assert(_target.Get<string>(Key0).Result != Value0);
+
+            // cleanup
+            _target.Remove(Key0);
         }
 
         public void Delete_EntryNotPresent_DoesNothing()
         {
-            Target.Remove(Key0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            _target.Remove(Key0).Wait();
+            Assert(_target.Get<string>(Key0).Result == null);
         }
 
         public void Delete_EntryPresent_RemovesValue()
         {
-            Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == Value0);
+            _target.Upsert(Key0, Value0).Wait();
+            Assert(_target.Get<string>(Key0).Result == Value0);
 
-            Target.Remove(Key0).Wait();
-            Assert(Target.Get(Key0, typeof(string)).Result == null);
+            _target.Remove(Key0).Wait();
+            Assert(_target.Get<string>(Key0).Result == null);
         }
 
-        public static void Assert(bool criteria)
+        private void Assert(bool criteria)
         {
             if (!criteria)
                 throw new InvalidOperationException("Assertion failed.");
@@ -279,7 +432,54 @@ namespace Solution
                 }
                 catch (Exception)
                 {
-                    Console.WriteLine("Failed");
+                    Console.WriteLine("Failed!!!!!!!!!!!");
+                }
+            }
+        }
+    }
+
+    public class PersonRepositoryTest
+    {
+        private const string Key0 = "f2aa8194c8804d979b4f233cc413afb3";
+        private readonly Person _person0 = new Person() {Id = Key0};
+
+        private readonly ICache _target = InMemoryCache.Instance;
+        private readonly IPersonRepository _personRepository = new PersonRepository();
+
+        public Action[] AllTests => new Action[]
+        {
+            GetPersonById_EntryNotInCache_ReturnsValue
+        };
+
+        public void GetPersonById_EntryNotInCache_ReturnsValue()
+        {
+            Assert(_target.Get<Person>(_person0.Key).Result == null);
+            Assert(_personRepository.GetPersonById(Key0).Result.Id == Key0);
+            Assert(_target.Get<Person>(_person0.Key).Result.Id == Key0);
+
+            // cleanup
+            _target.Remove(_person0.Key);
+        }
+
+        private void Assert(bool criteria)
+        {
+            if (!criteria)
+                throw new InvalidOperationException("Assertion failed.");
+        }
+
+        public void RunAllTests()
+        {
+            foreach (var test in AllTests)
+            {
+                Console.Write($"Running {test.GetMethodInfo().Name}...");
+                try
+                {
+                    test.Invoke();
+                    Console.WriteLine("Success");
+                }
+                catch (Exception)
+                {
+                    Console.WriteLine("Failed!!!!!!!!!!!");
                 }
             }
         }
