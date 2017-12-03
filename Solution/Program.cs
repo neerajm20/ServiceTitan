@@ -107,28 +107,27 @@ namespace Solution
         
         // Singleton referance
         // typically, this would be controlled via a IoC Container
-        private static ICache _instance = new InMemoryCache();
-
+        private static ICache instance = new InMemoryCache();
         public static ICache Instance
         {
-            get { return _instance; }
+            get { return instance; }
         }
 
-        private ReaderWriterLockSlim _cacheLock = new ReaderWriterLockSlim();
+        private ReaderWriterLockSlim cacheLock = new ReaderWriterLockSlim();
 
         private readonly ObjectCache _cache = new MemoryCache(DefaultCacheName);
         private static readonly TimeSpan MaxMaxAge = TimeSpan.FromMinutes(15);
 
         public async Task<T> Get<T>(string key)
         {
-            _cacheLock.EnterReadLock();
+            cacheLock.EnterReadLock();
             try
             {
-                return (T) (_cache.Get(key));
+                return await Task.FromResult((T)(_cache.Get(key))).ConfigureAwait(false);
             }
             finally
             {
-                _cacheLock.ExitReadLock();
+                cacheLock.ExitReadLock();
             }
         }
 
@@ -141,22 +140,23 @@ namespace Solution
                 ttl = MaxMaxAge;
             }
 
-            _cacheLock.EnterWriteLock();
+            cacheLock.EnterWriteLock();
             try
             {
                 _cache.Set(key, value, DateTime.Now.Add(ttl.Value));
+                await Task.FromResult(false).ConfigureAwait(false);
             }
             finally
             {
-                _cacheLock.ExitWriteLock();
+                cacheLock.ExitWriteLock();
             }
         }
 
         public async Task<T> GetOrInsert<T>(string key, Func<Task<T>> hydrator, TimeSpan? ttl = null)
         {
-            T value = default(T);
+            T value;
 
-            _cacheLock.EnterUpgradeableReadLock();
+            cacheLock.EnterUpgradeableReadLock();
             try
             {
                 value = await Get<T>(key).ConfigureAwait(false);
@@ -171,7 +171,7 @@ namespace Solution
             }
             finally
             {
-                _cacheLock.ExitUpgradeableReadLock();
+                cacheLock.ExitUpgradeableReadLock();
             }
 
             return value;
@@ -179,20 +179,21 @@ namespace Solution
 
         public async Task Remove(string key)
         {
-            _cacheLock.EnterWriteLock();
+            cacheLock.EnterWriteLock();
             try
             {
                 _cache.Remove(key);
+                await Task.FromResult(false).ConfigureAwait(false);
             }
             finally
             {
-                _cacheLock.ExitWriteLock();
+                cacheLock.ExitWriteLock();
             }
         }
 
         public void Dispose()
         {
-            _cacheLock?.Dispose();
+            cacheLock?.Dispose();
         }
     }
 
@@ -209,22 +210,69 @@ namespace Solution
 
         public Person()
         {
-            this.Ttl = TimeSpan.FromMilliseconds(PersonCacheAbsoluteExpirationMs);
+            Ttl = TimeSpan.FromMilliseconds(PersonCacheAbsoluteExpirationMs);
         }
 
         public string Id
         {
-            get { return this._id; }
+            get { return _id; }
             set
             {
-                this._id = value;
-                setKey(_id);
+                _id = value;
+                SetKey(_id);
             }
         }
 
-        private void setKey(string id)
+        private void SetKey(string id)
         {
-            this.Key = $"{this.GetType().AssemblyQualifiedName}.{Id}";
+            Key = $"{GetType().AssemblyQualifiedName}.{id}";
+        }
+    }
+    
+    [ContractClass(typeof(PersonRepositoryContract))]
+    public interface IPersonRepository
+    {
+        Task<Person> GetPersonById(string id);
+    }
+
+    [ContractClassFor(typeof(IPersonRepository))]
+    internal class PersonRepositoryContract : IPersonRepository
+    {
+        public Task<Person> GetPersonById(string id)
+        {
+            Contract.Requires(!String.IsNullOrWhiteSpace(id));
+            return null;
+        }
+    }
+
+    public class PersonRepository : IPersonRepository
+    {
+        private ICache cache;
+
+        // this code will be replaced to get a person from the data store
+        private Person person;
+
+        //TODO: nmittal - nmittal - ICache would typically be injected via an IoC Container
+        public PersonRepository(ICache cache = null)
+        {
+            if (cache == null) cache = InMemoryCache.Instance;
+            this.cache = cache;
+            
+            // this code will be replaced to get a person from the data store
+            person = new Person()
+            {
+                Id = "f2aa8194c8804d979b4f233cc413afb3",
+                FirstName = "Neeraj",
+                LastName = "Mittal"
+            };
+        }
+
+        public async Task<Person> GetPersonById(string id)
+        {
+            Func<Task<Person>> func = async () =>
+                await Task.FromResult(person).ConfigureAwait(false);
+            
+            return await cache.GetOrInsert(id, func).ConfigureAwait(false);
         }
     }
 
@@ -323,7 +371,7 @@ namespace Solution
         public void GetOrInsert_GetEntryPresent_ReturnsValue()
         {
             Target.Upsert(Key0, Value0).Wait();
-            Assert(Target.GetOrInsert<string>(Key0, async () => Value1).Result == Value0);
+            Assert(Target.GetOrInsert(Key0, async () => await Task.FromResult(Value1).ConfigureAwait(false)).Result == Value0);
             Assert(Target.Get<string>(Key0).Result != Value1);
 
             // cleanup
@@ -332,7 +380,7 @@ namespace Solution
 
         public void GetOrInsert_GetEntryNotPresent_ReturnsValue()
         {
-            Assert(Target.GetOrInsert<string>(Key0, async () => Value1).Result == Value1);
+            Assert(Target.GetOrInsert(Key0, async () => await Task.FromResult(Value1).ConfigureAwait(false)).Result == Value1);
             Assert(Target.Get<string>(Key0).Result != Value0);
 
             // cleanup
