@@ -97,6 +97,14 @@ namespace Solution
 
     public class InMemoryCache : ICache
     {
+        // Singleton referance
+        // typically, this would be controlled via a IoC Container
+        private static ICache _instance = new InMemoryCache();
+        public static ICache Instance
+        {
+            get { return _instance; }
+        }
+
         private readonly ObjectCache _cache = new MemoryCache("InMemoryCache");
         private static readonly TimeSpan MaxMaxAge = TimeSpan.FromMinutes(15);
 
@@ -169,7 +177,7 @@ namespace Solution
             LastName = "Mittal"
         };
 
-        private ICache Target = new InMemoryCache();
+        private ICache Target = InMemoryCache.Instance;
 
         public Action[] AllTests => new Action[]
         {
