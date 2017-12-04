@@ -97,7 +97,3 @@ Test cases for the PersonRepository implementation, including making sure ICache
 ## Authors
 
 * Neeraj Mittal
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
